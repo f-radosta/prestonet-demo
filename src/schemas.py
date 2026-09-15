@@ -4,15 +4,31 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.dictionary import MAX_ACTOR_ID_LENGTH, MAX_VARIABLES
+
 ProposalStatus = Literal["pending", "approved", "rejected"]
+
+
+def clean_actor_id(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > MAX_ACTOR_ID_LENGTH:
+        raise ValueError("actor_id is invalid")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise ValueError("actor_id is invalid")
+    return cleaned
 
 
 class MapRequest(BaseModel):
     request_id: str | None = None
-    actor_id: str = Field(min_length=1)
+    actor_id: str = Field(min_length=1, max_length=MAX_ACTOR_ID_LENGTH)
     document_id: str | None = None
-    variables: list[str] | None = None
+    variables: list[str] | None = Field(default=None, max_length=MAX_VARIABLES)
     document: dict[str, Any] | None = None
+
+    @field_validator("actor_id")
+    @classmethod
+    def actor_must_be_safe(cls, value: str) -> str:
+        return clean_actor_id(value)
 
     @field_validator("variables")
     @classmethod

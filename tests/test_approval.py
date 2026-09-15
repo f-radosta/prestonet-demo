@@ -11,7 +11,7 @@ def test_map_creates_pending_proposal_without_write(client: TestClient) -> None:
     assert body["write_performed"] is False
     proposal_id = body["proposal_id"]
 
-    fetched = client.get(f"/proposals/{proposal_id}")
+    fetched = client.get(f"/proposals/{proposal_id}", headers={"X-Actor-Id": "author-1"})
     assert fetched.status_code == 200
     proposal = fetched.json()
     assert proposal["status"] == "pending"
@@ -62,3 +62,29 @@ def test_approve_missing_proposal(client: TestClient) -> None:
         headers={"X-Actor-Id": "approver-1"},
     )
     assert response.status_code == 404
+
+
+def test_author_cannot_approve_own_proposal(client: TestClient) -> None:
+    created = client.post(
+        "/map",
+        json={"actor_id": "author-1", "variables": ["customerId"]},
+    )
+    proposal_id = created.json()["proposal_id"]
+    response = client.post(
+        f"/proposals/{proposal_id}/approve",
+        headers={"X-Actor-Id": "author-1"},
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
+    assert response.json()["write_performed"] is False
+
+
+def test_get_proposal_requires_actor(client: TestClient) -> None:
+    created = client.post(
+        "/map",
+        json={"actor_id": "author-1", "variables": ["customerId"]},
+    )
+    proposal_id = created.json()["proposal_id"]
+    response = client.get(f"/proposals/{proposal_id}")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_input"

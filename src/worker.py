@@ -8,17 +8,23 @@ from uuid import uuid4
 from src.dictionary import (
     APPROVED_TERMS,
     CONFIDENCE_THRESHOLD,
+    MAX_DOCUMENT_DEPTH,
+    MAX_DOCUMENT_NODES,
+    MAX_VARIABLE_NAME_LENGTH,
     MAX_VARIABLES,
+    SENSITIVE_COMPACT,
     SENSITIVE_KEY_DENYLIST,
+    compact,
 )
-from src.llm_client import LlmClient, LlmSuggestion, LlmUnavailableError
-from src.mapper import MappingHit, deterministic_map, normalize, strong_map
+from src.llm_client import LlmClient, LlmSuggestion, LlmUnavailableError, sanitize_llm_reason
+from src.mapper import MappingHit, deterministic_map, normalize, strong_map, token_set
 from src.proposals import ProposalStore
 from src.schemas import ErrorDetail, MapRequest, MapResponse, MappingItem
 
 logger = logging.getLogger(__name__)
 
-BIRTH_NUMBER_RE = re.compile(r"\b\d{6}/?\d{3,4}\b")
+BIRTH_NUMBER_RE = re.compile(r"(?<!\d)(\d{2})(\d{2})(\d{2})[\s./-]*(\d{3,4})(?!\d)")
+_SEPARATORS_RE = re.compile(r"[\s./-]")
 
 
 class InvalidInputError(Exception):
@@ -56,26 +62,84 @@ def extract_variables(request: MapRequest) -> list[str]:
     return _unique_names([str(key) for key in request.document.keys()])
 
 
-def _looks_like_birth_number(value: object) -> bool:
-    if not isinstance(value, str):
+def _has_illegal_chars(name: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in name)
+
+
+def is_sensitive_field_name(name: str) -> bool:
+    normalized = normalize(name)
+    if not normalized:
         return False
-    return bool(BIRTH_NUMBER_RE.search(value.strip()))
+    compact_name = compact(normalized)
+    tokens = token_set(name)
+    if tokens & SENSITIVE_KEY_DENYLIST or tokens & SENSITIVE_COMPACT:
+        return True
+    return any(term and term in compact_name for term in SENSITIVE_COMPACT)
+
+
+def _plausible_birth_date(month: str, day: str) -> bool:
+    mm = int(month)
+    dd = int(day)
+    if not 1 <= dd <= 31:
+        return False
+    return 1 <= mm <= 12 or 21 <= mm <= 32 or 51 <= mm <= 62 or 71 <= mm <= 82
+
+
+def _looks_like_birth_number(value: object) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, int):
+        text = str(abs(value))
+    elif isinstance(value, float) and value.is_integer():
+        text = str(abs(int(value)))
+    elif isinstance(value, str):
+        text = value.strip()
+    else:
+        return False
+
+    digits = _SEPARATORS_RE.sub("", text)
+    if digits.isdigit() and len(digits) in (9, 10):
+        return _plausible_birth_date(digits[2:4], digits[4:6])
+    match = BIRTH_NUMBER_RE.search(text)
+    return bool(match) and _plausible_birth_date(match.group(2), match.group(3))
+
+
+def _assert_safe_name(name: str) -> None:
+    if len(name) > MAX_VARIABLE_NAME_LENGTH or _has_illegal_chars(name):
+        raise InvalidInputError("Variable name is invalid")
+    if is_sensitive_field_name(name):
+        raise SensitiveInputError("Sensitive field name is not allowed")
+
+
+def _scan_document(value: object, *, depth: int, remaining: list[int]) -> None:
+    if remaining[0] <= 0:
+        raise InvalidInputError("Document is too large")
+    remaining[0] -= 1
+    if depth > MAX_DOCUMENT_DEPTH:
+        raise InvalidInputError("Document is nested too deeply")
+
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            _assert_safe_name(str(key))
+            if _looks_like_birth_number(nested):
+                raise SensitiveInputError("Document value looks like personal identification data")
+            if isinstance(nested, (dict, list)):
+                _scan_document(nested, depth=depth + 1, remaining=remaining)
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            if _looks_like_birth_number(item):
+                raise SensitiveInputError("Document value looks like personal identification data")
+            if isinstance(item, (dict, list)):
+                _scan_document(item, depth=depth + 1, remaining=remaining)
 
 
 def reject_if_sensitive(request: MapRequest, variables: list[str]) -> None:
     for name in variables:
-        normalized = normalize(name)
-        compact_name = normalized.replace("_", "")
-        if normalized in SENSITIVE_KEY_DENYLIST or compact_name in SENSITIVE_KEY_DENYLIST:
-            raise SensitiveInputError("Sensitive field name is not allowed")
-
-    if request.document:
-        for key, value in request.document.items():
-            normalized = normalize(str(key))
-            if normalized in SENSITIVE_KEY_DENYLIST or normalized.replace("_", "") in SENSITIVE_KEY_DENYLIST:
-                raise SensitiveInputError("Sensitive field name is not allowed")
-            if _looks_like_birth_number(value):
-                raise SensitiveInputError("Document value looks like personal identification data")
+        _assert_safe_name(name)
+    if request.document is not None:
+        _scan_document(request.document, depth=0, remaining=[MAX_DOCUMENT_NODES])
 
 
 def _clamp_confidence(value: float) -> float:
@@ -111,11 +175,13 @@ def _from_llm(source: str, suggestion: LlmSuggestion) -> MappingItem:
         reason = "llm suggestion outside approved dictionary discarded"
         confidence = 0.0
     else:
-        reason = suggestion.reason or "llm suggestion"
+        reason = sanitize_llm_reason(suggestion.reason or "llm suggestion")
         confidence = _clamp_confidence(suggestion.confidence)
         if suggested is None:
             reason = reason or "not in target dictionary"
-    needs_review = suggested is None or confidence < CONFIDENCE_THRESHOLD
+    # LLM output is untrusted: keep the suggestion if it is in the dictionary,
+    # but never auto-clear needs_review.
+    needs_review = True
     return MappingItem(
         source_variable=source,
         suggested_variable=suggested,

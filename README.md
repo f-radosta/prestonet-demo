@@ -30,6 +30,8 @@ pip install -e ".[dev]"
 uvicorn src.api:app --reload
 ```
 
+Demo v prohlížeči: [http://127.0.0.1:8000](http://127.0.0.1:8000) — dokumenty A/B/C, nejasné i citlivé vstupy, schválení bez zápisu.
+
 Příklad:
 
 ```bash

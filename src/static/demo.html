@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mapping worker PoC</title>
+  <style>
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #e7e5e4;
+      --paper: #faf8f5;
+      --card: #ffffff;
+      --accent: #0f4c5c;
+      --review: #b45309;
+      --blocked: #9f1239;
+      --ok: #166534;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    h1 { font-size: 1.6rem; margin: 0 0 6px; }
+    .lede { color: var(--muted); margin: 0 0 24px; max-width: 46rem; }
+    .dict {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 24px;
+    }
+    .dict span, .chip {
+      font-family: Consolas, "Cascadia Code", monospace;
+      font-size: 0.85rem;
+      background: #ecfeff;
+      color: var(--accent);
+      border: 1px solid #a5f3fc;
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+    input, textarea {
+      width: 100%;
+      font: inherit;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    textarea { min-height: 120px; font-family: Consolas, "Cascadia Code", monospace; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    button {
+      font: inherit;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+    button.secondary { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+    button.danger { background: var(--blocked); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    .status {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .pill {
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .pill.ok { background: #dcfce7; color: var(--ok); }
+    .pill.warn { background: #ffedd5; color: var(--review); }
+    .pill.bad { background: #ffe4e6; color: var(--blocked); }
+    .pill.neutral { background: #f5f5f4; color: var(--muted); }
+    .actions { display: flex; gap: 8px; margin-top: 16px; }
+    .error { color: var(--blocked); white-space: pre-wrap; }
+    .reason { color: var(--muted); font-size: 0.85rem; }
+    code { font-family: Consolas, "Cascadia Code", monospace; }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Mapping worker PoC</h1>
+    <p class="lede">
+      Worker přečte názvy polí z mock dokumentu, navrhne mapování na schválený slovník
+      a čeká na lidské schválení. Zdrojový dokument se nikdy nepřepisuje.
+    </p>
+    <div class="dict">
+      <span>customer_id</span>
+      <span>contract_number</span>
+      <span>service_address</span>
+    </div>
+
+    <section class="panel">
+      <div class="row">
+        <div>
+          <label for="actor">Žadatel (actor_id)</label>
+          <input id="actor" value="user-1" />
+        </div>
+        <div>
+          <label for="approver">Schvalovatel (X-Actor-Id)</label>
+          <input id="approver" value="approver-1" />
+        </div>
+      </div>
+      <label for="payload">Vstup: seznam názvů nebo JSON dokumentu</label>
+      <textarea id="payload">{
+  "customerId": "MOCK",
+  "contractNo": "MOCK",
+  "address_service": "MOCK"
+}</textarea>
+      <div class="presets">
+        <button class="secondary" type="button" data-preset="a">Dokument A</button>
+        <button class="secondary" type="button" data-preset="b">Dokument B</button>
+        <button class="secondary" type="button" data-preset="c">Dokument C</button>
+        <button class="secondary" type="button" data-preset="mixed">Jasné + neznámé</button>
+        <button class="secondary" type="button" data-preset="unclear">Nejasné (addr)</button>
+        <button class="secondary" type="button" data-preset="sensitive">Citlivé (password)</button>
+        <button type="button" id="map-btn">Navrhnout mapování</button>
+      </div>
+    </section>
+
+    <section class="panel" id="result-panel" hidden>
+      <div class="status" id="status"></div>
+      <div id="error" class="error" hidden></div>
+      <table id="table" hidden>
+        <thead>
+          <tr>
+            <th>Zdroj</th>
+            <th>Návrh</th>
+            <th>Confidence</th>
+            <th>Důvod</th>
+            <th>Review</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="actions">
+        <button type="button" id="approve-btn" disabled>Schválit návrh</button>
+        <button class="danger" type="button" id="reject-btn" disabled>Zamítnout</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const PRESETS = {
+      a: { kind: "document", value: { customer_id: "MOCK", contract_number: "MOCK", service_address: "MOCK" } },
+      b: { kind: "document", value: { customerId: "MOCK", contractNo: "MOCK", address_service: "MOCK" } },
+      c: { kind: "document", value: { ID_ZAKAZNIKA: "MOCK", cisloSmlouvy: "MOCK", adresaSluzby: "MOCK" } },
+      mixed: { kind: "variables", value: ["customerId", "vatId"] },
+      unclear: { kind: "variables", value: ["addr"] },
+      sensitive: { kind: "variables", value: ["password"] },
+    };
+
+    const payloadEl = document.getElementById("payload");
+    const resultPanel = document.getElementById("result-panel");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const tableEl = document.getElementById("table");
+    const tbody = tableEl.querySelector("tbody");
+    const approveBtn = document.getElementById("approve-btn");
+    const rejectBtn = document.getElementById("reject-btn");
+
+    let currentProposalId = null;
+
+    function showPreset(key) {
+      const preset = PRESETS[key];
+      payloadEl.value = preset.kind === "document"
+        ? JSON.stringify(preset.value, null, 2)
+        : preset.value.join(", ");
+    }
+
+    function parseInput(raw) {
+      const text = raw.trim();
+      if (!text) throw new Error("Vyplň vstup.");
+      if (text.startsWith("{")) return { document: JSON.parse(text) };
+      if (text.startsWith("[")) return { variables: JSON.parse(text) };
+      return { variables: text.split(/[\s,;]+/).filter(Boolean) };
+    }
+
+    function esc(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function pill(text, kind) {
+      const el = document.createElement("span");
+      el.className = `pill ${kind}`;
+      el.textContent = text;
+      return el;
+    }
+
+    function statusKind(status, httpStatus) {
+      if (status === "approved" || status === "proposal_ready") return "ok";
+      if (httpStatus >= 400) return "bad";
+      return "warn";
+    }
+
+    function render(body, httpStatus) {
+      resultPanel.hidden = false;
+      statusEl.replaceChildren();
+      tbody.replaceChildren();
+      errorEl.hidden = true;
+      tableEl.hidden = true;
+
+      const write = body.write_performed === true;
+      statusEl.append(
+        pill(`HTTP ${httpStatus}`, httpStatus >= 400 ? "bad" : "ok"),
+        pill(`status: ${body.status || "error"}`, statusKind(body.status, httpStatus)),
+        pill(`write_performed: ${Boolean(write)}`, write ? "bad" : "ok"),
+      );
+      if ("requires_approval" in body) {
+        statusEl.append(pill(`requires_approval: ${body.requires_approval}`, "neutral"));
+      }
+      if (body.proposal_id) {
+        statusEl.append(pill(`proposal: ${body.proposal_id.slice(0, 8)}…`, "neutral"));
+      }
+
+      if (body.error) {
+        errorEl.hidden = false;
+        errorEl.textContent = `${body.error.code}: ${body.error.message}`;
+      }
+
+      const mappings = body.mappings || [];
+      if (mappings.length) {
+        tableEl.hidden = false;
+        for (const item of mappings) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td><code>${esc(item.source_variable)}</code></td>
+            <td>${item.suggested_variable ? `<code>${esc(item.suggested_variable)}</code>` : "—"}</td>
+            <td>${esc(item.confidence ?? "")}</td>
+            <td class="reason">${esc(item.reason || "")}</td>
+            <td>${item.needs_review ? "ano" : "ne"}</td>
+          `;
+          tbody.append(tr);
+        }
+      }
+
+      currentProposalId = body.proposal_id || null;
+      const canDecide = Boolean(currentProposalId) && body.status !== "approved" && body.status !== "rejected";
+      approveBtn.disabled = !canDecide;
+      rejectBtn.disabled = !canDecide;
+    }
+
+    async function mapNow() {
+      const body = { actor_id: document.getElementById("actor").value.trim() || "user-1", ...parseInput(payloadEl.value) };
+      const response = await fetch("/map", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      render(await response.json(), response.status);
+    }
+
+    async function decide(action) {
+      if (!currentProposalId) return;
+      const response = await fetch(`/proposals/${currentProposalId}/${action}`, {
+        method: "POST",
+        headers: { "X-Actor-Id": document.getElementById("approver").value.trim() || "approver-1" },
+      });
+      render(await response.json(), response.status);
+    }
+
+    document.querySelectorAll("[data-preset]").forEach((btn) => {
+      btn.addEventListener("click", () => showPreset(btn.dataset.preset));
+    });
+    document.getElementById("map-btn").addEventListener("click", () => {
+      mapNow().catch((err) => {
+        resultPanel.hidden = false;
+        errorEl.hidden = false;
+        errorEl.textContent = err.message;
+      });
+    });
+    approveBtn.addEventListener("click", () => decide("approve"));
+    rejectBtn.addEventListener("click", () => decide("reject"));
+  </script>
+</body>
+</html>
